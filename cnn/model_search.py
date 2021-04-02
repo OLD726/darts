@@ -11,6 +11,9 @@ class MixedOp(nn.Module):
 
   def __init__(self, C, stride):
     super(MixedOp, self).__init__()
+
+    #将操作添加到modulelist(模块库)
+    #对于pool相关，添加bn
     self._ops = nn.ModuleList()
     for primitive in PRIMITIVES:
       op = OPS[primitive](C, stride, False)
@@ -24,20 +27,38 @@ class MixedOp(nn.Module):
 
 class Cell(nn.Module):
 
+'''
+steps
+multiplier
+C_prev_prev : 上上个输入cell的通道
+C_prev : 上个输入cell的通道
+C
+reduction ：当前cell是否为reduction cell
+reduction_prev ： 上一个cell是否为reduction cell
+'''
   def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev):
     super(Cell, self).__init__()
     self.reduction = reduction
 
+    #对一个cell的两个输入的处理
+
+    #pre_pre 上上个cell的输入通道
+    #如果上一个cell为reduction cell，则feature map减半，通道不变（operations.FactorizedReduce）
+    #否则，则feature map不变，通道减半（operations.ReLUConvBN）
     if reduction_prev:
       self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False)
     else:
       self.preprocess0 = ReLUConvBN(C_prev_prev, C, 1, 1, 0, affine=False)
+
+    #pre  上个cell的输入通道
+    #feature map不变，通道减半
     self.preprocess1 = ReLUConvBN(C_prev, C, 1, 1, 0, affine=False)
+
     self._steps = steps
     self._multiplier = multiplier
-
     self._ops = nn.ModuleList()
     self._bns = nn.ModuleList()
+
     for i in range(self._steps):
       for j in range(2+i):
         stride = 2 if reduction and j < 2 else 1
@@ -51,6 +72,8 @@ class Cell(nn.Module):
     states = [s0, s1]
     offset = 0
     for i in range(self._steps):
+      # 计算每一个节点的连接的feature map和
+      # ????
       s = sum(self._ops[offset+j](h, weights[offset+j]) for j, h in enumerate(states))
       offset += len(states)
       states.append(s)
@@ -138,8 +161,14 @@ class Network(nn.Module):
       start = 0
       for i in range(self._steps):
         end = start + n
+        #节点与其他节点存在连接的权重
         W = weights[start:end].copy()
+
+        #根据节点间的连接的权重，选择最优两个连接，未确定连接的op
         edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != PRIMITIVES.index('none')))[:2]
+
+        #对于每条边选择最优OP
+        #对于每个节点。选择两条边及op。
         for j in edges:
           k_best = None
           for k in range(len(W[j])):
@@ -151,6 +180,7 @@ class Network(nn.Module):
         n += 1
       return gene
 
+    #归一化，softmax，得到最终cell
     gene_normal = _parse(F.softmax(self.alphas_normal, dim=-1).data.cpu().numpy())
     gene_reduce = _parse(F.softmax(self.alphas_reduce, dim=-1).data.cpu().numpy())
 
